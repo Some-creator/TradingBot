@@ -6,7 +6,8 @@
       "Bash(python push.py:*)",
       "Bash(git fetch:*)",
       "Bash(git merge:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(git branch:*)"
     ]
   }
 }

@@ -132,9 +132,9 @@ def main():
     force_push = "--force" in sys.argv or "-f" in sys.argv
 
     if force_push:
-        result = run_command(["git", "push", "-u", "origin", "master:main", "--force"], check=False)
+        result = run_command(["git", "push", "-u", "origin", "main", "--force"], check=False)
     else:
-        result = run_command(["git", "push", "-u", "origin", "master:main"], check=False)
+        result = run_command(["git", "push", "-u", "origin", "main"], check=False)
 
     if result.returncode != 0:
         print(f"Push failed: {result.stderr}")
