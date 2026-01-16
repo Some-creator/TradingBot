@@ -112,9 +112,10 @@ def main():
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         commit_msg = f"Auto-update: {timestamp}"
 
-        # Check if custom message provided
-        if len(sys.argv) > 1:
-            commit_msg = " ".join(sys.argv[1:])
+        # Check if custom message provided (exclude flags)
+        args = [arg for arg in sys.argv[1:] if arg not in ("--force", "-f")]
+        if args:
+            commit_msg = " ".join(args)
 
         # Commit
         result = run_command(["git", "commit", "-m", commit_msg], check=False)
@@ -126,10 +127,18 @@ def main():
 
     # Push to remote (main branch only)
     print("\nPushing to origin/main...")
-    result = run_command(["git", "push", "-u", "origin", "master:main"], check=False)
+
+    # Check for --force flag
+    force_push = "--force" in sys.argv or "-f" in sys.argv
+
+    if force_push:
+        result = run_command(["git", "push", "-u", "origin", "master:main", "--force"], check=False)
+    else:
+        result = run_command(["git", "push", "-u", "origin", "master:main"], check=False)
 
     if result.returncode != 0:
         print(f"Push failed: {result.stderr}")
+        print("\nTip: Use --force or -f flag to force push if branches diverged")
         sys.exit(1)
 
     print("\nSuccessfully pushed to remote!")
