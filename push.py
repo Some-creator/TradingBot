@@ -124,17 +124,13 @@ def main():
             else:
                 print(f"Commit failed: {result.stderr}")
 
-    # Push to remote (both master and main to keep them in sync)
-    print("\nPushing to origin/master...")
-    result = run_command(["git", "push", "-u", "origin", "master"], check=False)
+    # Push to remote (main branch only)
+    print("\nPushing to origin/main...")
+    result = run_command(["git", "push", "-u", "origin", "master:main"], check=False)
 
     if result.returncode != 0:
-        print(f"Push to master failed: {result.stderr}")
+        print(f"Push failed: {result.stderr}")
         sys.exit(1)
-
-    # Also push to main to keep branches in sync
-    print("Syncing to origin/main...")
-    run_command(["git", "push", "origin", "master:main"], check=False)
 
     print("\nSuccessfully pushed to remote!")
 
