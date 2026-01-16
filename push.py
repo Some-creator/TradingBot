@@ -124,21 +124,17 @@ def main():
             else:
                 print(f"Commit failed: {result.stderr}")
 
-    # Push to remote
+    # Push to remote (both master and main to keep them in sync)
     print("\nPushing to origin/master...")
     result = run_command(["git", "push", "-u", "origin", "master"], check=False)
 
     if result.returncode != 0:
-        # Try main branch if master fails
-        print("Trying origin/main...")
-        result = run_command(["git", "push", "-u", "origin", "main"], check=False)
+        print(f"Push to master failed: {result.stderr}")
+        sys.exit(1)
 
-        if result.returncode != 0:
-            print(f"\nPush failed. You may need to:")
-            print("1. Set up authentication: git config credential.helper store")
-            print("2. Or use SSH: git remote set-url origin git@github.com:Some-creator/TradingBot.git")
-            print(f"\nError: {result.stderr}")
-            sys.exit(1)
+    # Also push to main to keep branches in sync
+    print("Syncing to origin/main...")
+    run_command(["git", "push", "origin", "master:main"], check=False)
 
     print("\nSuccessfully pushed to remote!")
 

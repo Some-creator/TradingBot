@@ -3,7 +3,10 @@
     "allow": [
       "Bash(mkdir:*)",
       "Bash(python -m py_compile:*)",
-      "Bash(python push.py:*)"
+      "Bash(python push.py:*)",
+      "Bash(git fetch:*)",
+      "Bash(git merge:*)",
+      "Bash(git push:*)"
     ]
   }
 }
