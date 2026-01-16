@@ -1,78 +1,115 @@
-# Intraday Trading Bot
+# Rule-Based Intraday Trading System
 
-A rule-based intraday trading system for SPY and QQQ.
+A rule-based intraday trading bot for SPY/QQQ that combines sentiment analysis, gamma exposure (GEX) levels, and Fair Value Gap (FVG) patterns for entry signals.
+
+## Architecture
+
+```
+Sentiment (Claude Haiku) -> Sets Bias (Filter)
+Options Data (GEX)       -> Sets Levels (Zones)
+Price Action (yfinance)  -> Triggers Execution
+```
 
 ## Features
 
-- **Sentiment Analysis**: Claude Haiku for pre-market news analysis
-- **Options Structure**: Put/Call Walls from delayed CBOE data
-- **FVG Detection**: Fair Value Gap and Inversion FVG triggers
-- **Risk Management**: Max trades, daily loss limits, consecutive loss lockout
+- **Sentiment Analysis**: Uses Claude Haiku to analyze pre-market news headlines
+- **Gamma Exposure Levels**: Calculates Call Wall, Put Wall, and Zero Gamma from options OI
+- **FVG Detection**: Identifies Fair Value Gaps and Inverted FVGs for entry triggers
+- **Risk Management**: Max 3 trades/day, 1.5% max daily loss, 0.5% max per trade
+- **State Persistence**: Redis-backed state for Railway deployment
 
-## Setup
+## Components
+
+| Component | Description |
+|-----------|-------------|
+| `SentimentEngine` | LLM-powered sentiment analysis with VIX and trend adjustments |
+| `GammaCalculator` | Options-based support/resistance level calculation |
+| `FVGDetector` | Fair Value Gap detection and lifecycle management |
+| `SignalGenerator` | Entry/exit signal generation based on rules |
+| `RiskManager` | Position sizing and risk validation |
+| `OrderManager` | Order execution and trade lifecycle |
+| `StateManager` | Redis-backed state persistence |
+
+## Entry Logic
+
+### Long Setup (Bullish Bias)
+1. Price sweeps into/through Put Wall Zone (support)
+2. Trigger: Reclaim (close above zone) OR Bullish IFVG forms
+3. Stop: Below sweep low + buffer
+4. TP1: +0.3%, TP2: Call Wall
+
+### Short Setup (Bearish Bias)
+1. Price rallies into/through Call Wall Zone (resistance)
+2. Trigger: Reclaim (close below zone) OR Bearish IFVG forms
+3. Stop: Above sweep high + buffer
+4. TP1: -0.3%, TP2: Put Wall
+
+## Risk Rules
+
+- Max 3 trades per day
+- Max 1.5% daily loss (lockout)
+- Max 0.5% risk per trade
+- 2 consecutive losses pauses trading
+- VIX >10% intraday move triggers shutdown
+- Data lag >60 seconds triggers shutdown
+
+## Deployment (Railway)
+
+### Environment Variables
+
+```
+ANTHROPIC_API_KEY=your_key
+REDIS_URL=redis://...
+TRADING_MODE=PAPER
+MAX_DAILY_LOSS=1.5
+PORT=8000
+```
+
+### Deploy
+
+1. Connect repository to Railway
+2. Add Redis plugin
+3. Set environment variables
+4. Deploy
+
+### Health Check
+
+```
+GET /health
+```
+
+### Status Endpoint
+
+```
+GET /status
+```
+
+## Local Development
 
 ```bash
 # Create virtual environment
 python -m venv venv
-venv\Scripts\activate  # Windows
+source venv/bin/activate  # or venv\Scripts\activate on Windows
 
 # Install dependencies
 pip install -r requirements.txt
 
-# Copy environment template
-copy .env.example .env
-# Edit .env with your API keys
+# Set environment variables
+cp .env.example .env
+# Edit .env with your keys
+
+# Run
+python main.py
 ```
 
-## Configuration
+## API Endpoints
 
-Edit `.env` file:
+| Endpoint | Description |
+|----------|-------------|
+| `GET /health` | Health check for Railway |
+| `GET /status` | Current bot status, sentiment, positions |
+| `GET /trades` | Today's trades |
 
-```
-TRADING_MODE=PAPER        # PAPER or LIVE
-ANTHROPIC_API_KEY=...     # Claude API key
-REDIS_URL=...             # Redis connection string
-```
+## Disclaimer
 
-## Running
-
-```bash
-# Start the bot
-python -m src.main
-
-# Health check endpoint
-curl http://localhost:8080/health
-
-# Trading status
-curl http://localhost:8080/status
-
-# Gamma levels
-curl http://localhost:8080/levels/SPY
-```
-
-## Project Structure
-
-```
-src/
-├── config.py          # Configuration management
-├── models.py          # Data models (Candle, FVG, Trade, etc.)
-├── state.py           # Redis state persistence
-├── main.py            # Main application & trading loop
-├── data/
-│   └── price_fetcher.py   # yfinance price data
-├── analysis/
-│   ├── fvg_detector.py    # FVG detection logic
-│   ├── gamma_calculator.py # Options level calculation
-│   └── sentiment_engine.py # Claude Haiku sentiment
-└── execution/
-    ├── signal_generator.py # Entry signal detection
-    ├── risk_manager.py     # Risk & position sizing
-    └── order_manager.py    # Trade execution
-```
-
-## Strategy
-
-1. **Pre-Market**: Analyze sentiment → Set daily bias (Long/Short/Neutral)
-2. **Levels**: Calculate Put Wall (Support), Call Wall (Resistance)
-3. **Entry**: Wait for Sweep & Reclaim or IFVG at levels
-4. **Exit**: TP1 (0.3%), TP2 (opposite wall), or Time Stop (30 min)
+This is for educational purposes only. Trading involves substantial risk of loss. Paper trade first and never risk money you cannot afford to lose.

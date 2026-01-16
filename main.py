@@ -1,18 +1,6 @@
-"""
-Railway entry point.
-Exposes FastAPI app for uvicorn.
-"""
+"""Entry point for the trading bot."""
 
-import sys
-import os
+from src.main import app, main
 
-# Add project root to path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-# Import the FastAPI app for Railway's uvicorn
-from src.main import app
-
-# For local running
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    main()

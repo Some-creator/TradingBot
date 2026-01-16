@@ -221,13 +221,13 @@ To increase precision, we track **Fair Value Gaps (FVG)**.
 
 ---
 
-## 10. Deployment Optimization (Runway / Cloud Native)
+## 10. Deployment (Railway)
 
-To ensure this bot runs reliably on a cloud PaaS (e.g., Railway, Render, etc.):
+The bot is designed to run natively on **Railway**.
 
 1.  **Stateless Architecture**:
     *   **State Persistence**: The bot logic will **NOT** rely on local JSON files for trade state (which vanish on restart).
-    *   **Solution**: Use a remote Redis instance or Postgres to store `Current_Trades`, `Daily_Loss`, and `Trade_Count`. This ensures if the bot crashes and restarts, it knows it has already traded 2/3 times today.
+    *   **Solution**: Use **Railway's Redis** plugin to store `Current_Trades`, `Daily_Loss`, and `Trade_Count`. This ensures if the bot crashes and restarts, it knows it has already traded 2/3 times today.
 2.  **Environment Variables**:
     *   Strict separation of secrets. `API_KEY_CLAUDE`, `API_KEY_BROKER`, `REDIS_URL` will be injected at runtime.
     *   Config flags: `TRADING_MODE=PAPER`, `MAX_DAILY_LOSS=1.5`.

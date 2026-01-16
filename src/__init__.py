@@ -1,2 +1,1 @@
-# Intraday Trading Bot
-__version__ = "0.1.0"
+"""Trading system package."""

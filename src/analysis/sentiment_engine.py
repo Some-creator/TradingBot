@@ -1,219 +1,306 @@
-"""
-Sentiment Analysis Engine using Claude Haiku.
-Analyzes pre-market news to determine daily trading bias.
-"""
+"""Sentiment analysis engine using Claude Haiku."""
 
-import asyncio
-from datetime import datetime, date
-from typing import Optional, Tuple
 import json
-from loguru import logger
-from anthropic import AsyncAnthropic
+import logging
+from datetime import datetime
+from typing import Optional
 
-from src.models import MarketBias, Direction
-from src.config import api, trading
+import anthropic
+import yfinance as yf
+
+from src.config import config
+from src.models import SentimentScore, Bias
+
+logger = logging.getLogger(__name__)
+
+# Emergency keywords that should pause trading
+EMERGENCY_KEYWORDS = [
+    "breaking",
+    "halted",
+    "crash",
+    "circuit breaker",
+    "flash crash",
+    "emergency",
+    "war",
+    "attack",
+    "default",
+]
+
+# Macro event keywords that trigger NO_TRADE
+MACRO_EVENTS = [
+    "fomc",
+    "fed meeting",
+    "fed decision",
+    "rate decision",
+    "cpi",
+    "inflation data",
+    "nfp",
+    "non-farm payroll",
+    "jobs report",
+    "employment report",
+]
 
 
 class SentimentEngine:
-    """
-    Determines daily trading bias using Claude Haiku for sentiment analysis.
-    
-    Combines:
-    - LLM sentiment score (-100 to +100)
-    - Technical overlay (20-day MA filter)
-    - VIX filter
-    - Macro calendar check
-    """
-    
-    MACRO_EVENT_KEYWORDS = [
-        "FOMC", "Fed", "CPI", "NFP", "Non-Farm", "Powell", 
-        "rate decision", "inflation report", "employment report"
-    ]
-    
-    def __init__(self):
-        self._client: Optional[AsyncAnthropic] = None
-        self._cached_bias: Optional[MarketBias] = None
-    
-    async def _get_client(self) -> AsyncAnthropic:
+    """Analyzes market sentiment using Claude Haiku and technical indicators."""
+
+    def __init__(self, api_key: str = None):
+        self.api_key = api_key or config.claude_api_key
+        self._client: Optional[anthropic.Anthropic] = None
+
+    def _get_client(self) -> anthropic.Anthropic:
         """Get or create Anthropic client."""
-        if self._client is None:
-            self._client = AsyncAnthropic(api_key=api.anthropic_api_key)
+        if not self._client:
+            self._client = anthropic.Anthropic(api_key=self.api_key)
         return self._client
-    
-    async def analyze_headlines(self, headlines: list[str]) -> Tuple[int, str]:
+
+    async def analyze_sentiment(
+        self,
+        headlines: list[str],
+        overnight_high: float,
+        overnight_low: float,
+        premarket_volume: int,
+        current_price: float,
+    ) -> SentimentScore:
         """
-        Analyze headlines using Claude Haiku.
-        
+        Analyze market sentiment from news headlines and market data.
+
+        Args:
+            headlines: List of pre-market news headlines
+            overnight_high: Overnight session high price
+            overnight_low: Overnight session low price
+            premarket_volume: Pre-market trading volume
+            current_price: Current SPY/QQQ price
+
         Returns:
-            (score, rationale) where score is -100 to +100
+            SentimentScore with bias determination
+        """
+        # Check for emergency keywords
+        all_text = " ".join(headlines).lower()
+        emergency_detected = any(kw in all_text for kw in EMERGENCY_KEYWORDS)
+
+        # Check for macro event day
+        is_macro_day = any(kw in all_text for kw in MACRO_EVENTS)
+
+        if is_macro_day:
+            logger.warning("Macro event day detected - NO TRADE")
+            return SentimentScore(
+                timestamp=datetime.now(),
+                llm_score=0,
+                trend_adjustment=0,
+                vix_bias="neutral",
+                final_score=0,
+                bias=Bias.NO_TRADE,
+                rationale="Macro event day (FOMC/CPI/NFP) - trading suspended",
+                is_macro_event_day=True,
+                emergency_keywords_detected=emergency_detected,
+            )
+
+        # Get LLM sentiment score
+        llm_score, rationale = await self._get_llm_sentiment(
+            headlines, overnight_high, overnight_low, premarket_volume
+        )
+
+        # Get trend adjustment (price vs 20-day MA)
+        trend_adjustment = self._get_trend_adjustment(current_price)
+
+        # Get VIX bias
+        vix_value, vix_bias = self._get_vix_bias()
+
+        # Calculate final score
+        final_score = llm_score + trend_adjustment
+
+        # Determine bias
+        if emergency_detected:
+            bias = Bias.NO_TRADE
+            rationale = f"Emergency keywords detected. Original: {rationale}"
+        elif final_score > config.final_bullish_threshold:
+            bias = Bias.BULLISH
+        elif final_score < config.final_bearish_threshold:
+            bias = Bias.BEARISH
+        else:
+            bias = Bias.NEUTRAL
+
+        return SentimentScore(
+            timestamp=datetime.now(),
+            llm_score=llm_score,
+            trend_adjustment=trend_adjustment,
+            vix_bias=vix_bias,
+            final_score=final_score,
+            bias=bias,
+            rationale=rationale,
+            is_macro_event_day=is_macro_day,
+            emergency_keywords_detected=emergency_detected,
+        )
+
+    async def _get_llm_sentiment(
+        self,
+        headlines: list[str],
+        overnight_high: float,
+        overnight_low: float,
+        premarket_volume: int,
+    ) -> tuple[int, str]:
+        """
+        Get sentiment score from Claude Haiku.
+
+        Returns:
+            Tuple of (score, rationale)
         """
         if not headlines:
-            return 0, "No headlines to analyze"
-        
-        headlines_text = "\n".join([f"- {h}" for h in headlines[:20]])
-        
-        prompt = f"""Analyze these financial news headlines for SPY/QQQ market sentiment.
+            return 0, "No headlines available for analysis"
+
+        headlines_text = "\n".join(f"- {h}" for h in headlines[:20])
+
+        prompt = f"""Analyze these pre-market headlines for SPY/QQQ market sentiment.
 
 Headlines:
 {headlines_text}
 
-Instructions:
-1. Consider the overall market impact of these headlines
-2. Focus on factors that would affect SPY (S&P 500) and QQQ (Nasdaq 100)
-3. Output ONLY a JSON object with this exact format:
-{{"score": <integer from -100 to +100>, "rationale": "<one sentence explanation>"}}
+Market Data:
+- Overnight High: ${overnight_high:.2f}
+- Overnight Low: ${overnight_low:.2f}
+- Pre-market Volume: {premarket_volume:,}
 
-Where:
-- score > 50: Strong bullish (risk-on, earnings beats, stimulus, rate cuts)
-- score 20-50: Mildly bullish
-- score -20 to 20: Neutral/mixed
-- score -50 to -20: Mildly bearish
-- score < -50: Strong bearish (risk-off, geopolitical, rate hikes, recession fears)
+Output a single JSON object with:
+- "score": integer from -100 (extremely bearish) to +100 (extremely bullish)
+- "rationale": one sentence explaining the score
 
-JSON output:"""
+Score guidelines:
+- +80 to +100: Very bullish (strong earnings beats, major positive news)
+- +40 to +79: Bullish (positive economic data, sector strength)
+- +1 to +39: Slightly bullish (mixed but leaning positive)
+- 0: Neutral (no clear direction)
+- -1 to -39: Slightly bearish (mixed but leaning negative)
+- -40 to -79: Bearish (negative economic data, sector weakness)
+- -80 to -100: Very bearish (major negative events, recession fears)
+
+Respond with ONLY the JSON object, no other text."""
 
         try:
-            client = await self._get_client()
-            
-            response = await client.messages.create(
-                model="claude-3-5-haiku-20241022",
-                max_tokens=150,
-                messages=[{"role": "user", "content": prompt}]
+            client = self._get_client()
+            response = client.messages.create(
+                model="claude-3-haiku-20240307",
+                max_tokens=200,
+                messages=[{"role": "user", "content": prompt}],
             )
-            
-            # Parse JSON from response
+
+            # Parse response
             response_text = response.content[0].text.strip()
-            
-            # Handle potential JSON formatting issues
-            if not response_text.startswith("{"):
-                # Try to extract JSON from response
-                start = response_text.find("{")
-                end = response_text.rfind("}") + 1
-                if start != -1 and end > start:
-                    response_text = response_text[start:end]
-            
+
+            # Handle potential markdown code blocks
+            if response_text.startswith("```"):
+                lines = response_text.split("\n")
+                response_text = "\n".join(lines[1:-1])
+
             result = json.loads(response_text)
-            score = int(result.get("score", 0))
+            score = max(-100, min(100, int(result.get("score", 0))))
             rationale = result.get("rationale", "No rationale provided")
-            
-            # Clamp score to valid range
-            score = max(-100, min(100, score))
-            
-            logger.info(f"Sentiment analysis: {score} - {rationale}")
+
+            logger.info(f"LLM sentiment score: {score} - {rationale}")
             return score, rationale
-            
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse LLM response: {e}")
+            return 0, "Failed to parse sentiment response"
         except Exception as e:
-            logger.error(f"Error in sentiment analysis: {e}")
-            return 0, f"Analysis error: {str(e)}"
-    
-    def check_macro_event_day(self, headlines: list[str]) -> bool:
-        """Check if today has a major macro event that should pause trading."""
-        combined = " ".join(headlines).lower()
-        
-        for keyword in self.MACRO_EVENT_KEYWORDS:
-            if keyword.lower() in combined:
-                logger.warning(f"Macro event detected: {keyword}")
+            logger.error(f"LLM sentiment analysis failed: {e}")
+            return 0, f"Sentiment analysis error: {str(e)}"
+
+    def _get_trend_adjustment(self, current_price: float, symbol: str = "SPY") -> int:
+        """
+        Get trend adjustment based on price vs 20-day MA.
+
+        Returns:
+            +10 if price > 20-day MA, -10 if below, 0 on error
+        """
+        try:
+            ticker = yf.Ticker(symbol)
+            hist = ticker.history(period="1mo")
+
+            if len(hist) < 20:
+                return 0
+
+            ma_20 = hist["Close"].tail(20).mean()
+
+            if current_price > ma_20:
+                logger.debug(f"Price ${current_price:.2f} > 20-day MA ${ma_20:.2f}: +10")
+                return 10
+            else:
+                logger.debug(f"Price ${current_price:.2f} < 20-day MA ${ma_20:.2f}: -10")
+                return -10
+
+        except Exception as e:
+            logger.error(f"Failed to calculate trend adjustment: {e}")
+            return 0
+
+    def _get_vix_bias(self) -> tuple[float, str]:
+        """
+        Get VIX-based bias adjustment.
+
+        Returns:
+            Tuple of (vix_value, bias_string)
+        """
+        try:
+            vix = yf.Ticker("^VIX")
+            vix_data = vix.history(period="1d")
+
+            if vix_data.empty:
+                return 0.0, "neutral"
+
+            vix_value = vix_data["Close"].iloc[-1]
+
+            if vix_value < config.vix_bullish_threshold:
+                bias = "bullish"
+            elif vix_value > config.vix_bearish_threshold:
+                bias = "bearish"
+            else:
+                bias = "neutral"
+
+            logger.debug(f"VIX: {vix_value:.2f} - Bias: {bias}")
+            return vix_value, bias
+
+        except Exception as e:
+            logger.error(f"Failed to get VIX data: {e}")
+            return 0.0, "neutral"
+
+    async def check_vix_explosion(self) -> bool:
+        """
+        Check if VIX has exploded > 10% intraday (shut-off condition).
+
+        Returns:
+            True if VIX explosion detected
+        """
+        try:
+            vix = yf.Ticker("^VIX")
+            vix_data = vix.history(period="1d", interval="1m")
+
+            if len(vix_data) < 2:
+                return False
+
+            open_price = vix_data["Open"].iloc[0]
+            current_price = vix_data["Close"].iloc[-1]
+
+            pct_change = abs(current_price - open_price) / open_price * 100
+
+            if pct_change > config.vix_explosion_pct:
+                logger.warning(f"VIX explosion detected: {pct_change:.2f}% change")
                 return True
-        
-        return False
-    
-    async def calculate_bias(
-        self, 
-        headlines: list[str],
-        current_price: float,
-        ma_20: float,
-        vix: float
-    ) -> MarketBias:
-        """
-        Calculate the full daily bias score.
-        
-        Scoring:
-        - LLM Score: -100 to +100
-        - MA Filter: +10 if price > 20MA, -10 if below
-        - VIX Filter: preference adjustment (no direct score change)
-        
-        Final Decision:
-        - > +30: Bullish (Longs only)
-        - < -30: Bearish (Shorts only)
-        - Else: Neutral
-        """
-        today = date.today().isoformat()
-        
-        # Check for macro events
-        is_macro_day = self.check_macro_event_day(headlines)
-        
-        if is_macro_day:
-            bias = MarketBias(
-                date=today,
-                score=0,
-                direction=Direction.NO_TRADE,
-                rationale="Macro event day - trading paused",
-                vix_level=vix,
-                above_20ma=current_price > ma_20,
-                is_macro_event_day=True
-            )
-            self._cached_bias = bias
-            return bias
-        
-        # Get LLM sentiment
-        llm_score, rationale = await self.analyze_headlines(headlines)
-        
-        # Apply MA filter
-        above_ma = current_price > ma_20
-        ma_adjustment = 10 if above_ma else -10
-        
-        final_score = llm_score + ma_adjustment
-        
-        # Determine direction
-        if final_score > 30:
-            direction = Direction.LONG
-        elif final_score < -30:
-            direction = Direction.SHORT
-        else:
-            direction = Direction.NEUTRAL
-        
-        # VIX adjustment (preference, not hard filter)
-        vix_note = ""
-        if vix < 15:
-            vix_note = " (Low VIX favors longs)"
-        elif vix > 25:
-            vix_note = " (High VIX favors shorts)"
-        
-        bias = MarketBias(
-            date=today,
-            score=final_score,
-            direction=direction,
-            rationale=f"{rationale}{vix_note}",
-            vix_level=vix,
-            above_20ma=above_ma,
-            is_macro_event_day=False
-        )
-        
-        self._cached_bias = bias
-        logger.info(f"Daily Bias: {direction.value} (Score: {final_score})")
-        
-        return bias
-    
-    def get_cached_bias(self) -> Optional[MarketBias]:
-        """Get the cached daily bias."""
-        return self._cached_bias
-    
-    def allows_direction(self, target_direction: Direction) -> bool:
-        """Check if the current bias allows a trade in the given direction."""
-        if self._cached_bias is None:
-            return False
-        
-        bias_dir = self._cached_bias.direction
-        
-        if bias_dir == Direction.NO_TRADE:
-            return False
-        
-        if bias_dir == Direction.NEUTRAL:
-            # Neutral allows both directions (mean reversion)
-            return True
-        
-        return bias_dir == target_direction
 
+            return False
 
-# Global instance
-sentiment_engine = SentimentEngine()
+        except Exception as e:
+            logger.error(f"Failed to check VIX explosion: {e}")
+            return False
+
+    async def get_quick_sentiment_update(self) -> tuple[int, bool]:
+        """
+        Quick sentiment check without full LLM analysis.
+        Used for real-time emergency detection.
+
+        Returns:
+            Tuple of (sentiment_direction, emergency_detected)
+            sentiment_direction: 1 (bullish), -1 (bearish), 0 (neutral)
+        """
+        # This would integrate with a real news feed API
+        # For now, return neutral with no emergency
+        return 0, False
